@@ -28,12 +28,17 @@ import re
 import time
 import math
 import random
+import warnings
 
 import cv2
 import easyocr
 import pyautogui
 
 from utils import screenshot
+
+# La GTX 1650 no soporta cierto plan de cuDNN para easyOCR; usa un fallback y funciona
+# igual. Silenciamos ese warning para no ensuciar la consola.
+warnings.filterwarnings("ignore", message=".*cudnn.*")
 
 # ============================= CONFIG (CALIBRAR) =============================
 
@@ -80,16 +85,28 @@ END_BATTLE_CONFIRM = (1130, 700)    # confirmacion ("Okay") -- CALIBRAR si tu cl
 RETURN_HOME_BTN = (975, 935)        # boton "Volver" en la pantalla de resultado
 
 # --- Lectura del % de destruccion ---
-# Region (izquierda, arriba, ancho, alto) de las estrellas + % (abajo a la derecha).
-PCT_REGION = (1634, 780, 212, 61)
+# Region (izquierda, arriba, ancho, alto) que captura SOLO los digitos del % (sin el
+# texto "Dano total" de arriba ni el signo "%" de la derecha, que ensucian el OCR).
+# Validada con frames reales: lee bien 4, 25, 54.
+PCT_REGION = (1712, 806, 116, 52)
 # Umbral para cortar el ataque.
 TARGET_PCT = 50
 # Cuanto esperar como maximo (segundos) antes de cortar igual aunque no llegue al 50%.
 ATTACK_TIMEOUT = 120
 
+# --- Recursos propios: atacar hasta llenarlos (se leen en tu aldea, arriba-derecha) ---
+# Region (izq, arriba, ancho, alto) del numero de cada recurso. Validadas con frame real.
+GOLD_REGION   = (1575, 70, 205, 40)
+ELIXIR_REGION = (1575, 144, 205, 40)
+DARK_REGION   = (1575, 220, 205, 40)
+# Objetivos: el bot ataca hasta que los 3 recursos lleguen a estos valores.
+GOLD_TARGET   = 31_000_000
+ELIXIR_TARGET = 31_000_000
+DARK_TARGET   = 470_000        # max actual del deposito (subir a 500_000 si lo mejoras)
+
 # --- Pausas (segundos) entre acciones ---
 DEPLOY_PAUSE = 0.15
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 0.5         # cada cuanto leer el % (mas chico = corta mas cerca del 50%)
 
 # ============================================================================
 
@@ -215,34 +232,63 @@ def deploy_heroes(activate_ability=True):
             time.sleep(0.2)
 
 
-def read_destruction_pct():
-    """Lee el % de destruccion de la pantalla con OCR. Devuelve int o None."""
-    screenshot(PCT_REGION, _PCT_TMP)
+def _ocr_number(region, threshold=None):
+    """Captura una region, la agranda 3x y lee un entero con OCR. None si no hay digitos.
+    Con threshold binariza (mejor para el % blanco); sin threshold lee mejor numeros grandes."""
+    screenshot(region, _PCT_TMP)
     img = cv2.imread(_PCT_TMP)
     if img is None:
         return None
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # el numero es blanco -> THRESH_BINARY lo deja en blanco sobre fondo negro
-    black_white = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)[1]
-    result = _get_reader().readtext(black_white, detail=0, paragraph=True)
+    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    if threshold is not None:
+        gray = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)[1]
+    result = _get_reader().readtext(gray, detail=0, paragraph=True, allowlist='0123456789')
     digits = re.sub(r'[^0-9]', '', ''.join(result))
     return int(digits) if digits else None
 
 
+def read_destruction_pct():
+    """Lee el % de destruccion de la pantalla con OCR. Devuelve int (0-100) o None."""
+    val = _ocr_number(PCT_REGION, threshold=160)
+    return val if (val is not None and 0 <= val <= 100) else None
+
+
+def read_resources():
+    """Lee (oro, elixir, oscuro) de tu aldea. Cada uno puede ser None si no se pudo leer."""
+    return (_ocr_number(GOLD_REGION),
+            _ocr_number(ELIXIR_REGION),
+            _ocr_number(DARK_REGION))
+
+
+def resources_full():
+    """True si los 3 recursos llegaron a su objetivo (debe estar en la aldea propia)."""
+    g, e, d = read_resources()
+    print(f"  Recursos -> oro:{g}  elixir:{e}  oscuro:{d}", flush=True)
+    return (g is not None and g >= GOLD_TARGET and
+            e is not None and e >= ELIXIR_TARGET and
+            d is not None and d >= DARK_TARGET)
+
+
 def wait_until_pct(target=TARGET_PCT, timeout=ATTACK_TIMEOUT):
-    """Sondea el % hasta llegar a 'target' o agotar 'timeout'. Devuelve el ultimo % leido."""
+    """Sondea el % hasta llegar a 'target' o agotar 'timeout'. Devuelve el maximo % leido.
+
+    La destruccion solo SUBE, asi que usamos el maximo acumulado: una lectura mas baja
+    que el maximo es un error de OCR y se ignora.
+    """
     start = time.time()
-    last = 0
+    best = 0
     while time.time() - start < timeout:
         pct = read_destruction_pct()
-        if pct is not None and pct <= 100:
-            last = pct
-            print(f"Destruccion: {pct}%")
-            if pct >= target:
-                return pct
+        if pct is not None:
+            if pct > best:
+                best = pct
+            print(f"Destruccion leida: {pct}%  (max {best}%)")
+            if best >= target:
+                return best
         time.sleep(POLL_INTERVAL)
-    print(f"Timeout: corto igual con {last}% (no llego a {target}%).")
-    return last
+    print(f"Timeout: corto con {best}% (no llego a {target}%).")
+    return best
 
 
 def end_battle():
@@ -287,6 +333,14 @@ if __name__ == "__main__":
         # Util para calibrar PCT_REGION: entra a una batalla y corre esto.
         print(f"Leyendo % en la region {PCT_REGION} ...", flush=True)
         print(f"Lei: {read_destruction_pct()}", flush=True)
+
+    elif mode == "res":
+        # Lee TUS recursos una vez (parate en tu aldea). No hace clicks -> seguro.
+        g, e, d = read_resources()
+        print(f"Oro:    {g}  (objetivo {GOLD_TARGET})", flush=True)
+        print(f"Elixir: {e}  (objetivo {ELIXIR_TARGET})", flush=True)
+        print(f"Oscuro: {d}  (objetivo {DARK_TARGET})", flush=True)
+        print(f"Llenos?: {resources_full()}", flush=True)
 
     elif mode == "coords":
         # Muestra DONDE clickearia, sin clickear -> seguro.

@@ -94,21 +94,25 @@ def find_button(reference_image_path, village_image_path):
     matches = cv2.matchTemplate(village_img, next_button_img, cv2.TM_CCOEFF_NORMED)
     min, max, min_loc, max_loc = cv2.minMaxLoc(matches)
 
-def wait_for_base():
+def wait_for_base(timeout=25):
     """Espera a que se despejen las nubes del matchmaking y la base quede cargada.
 
+    Tiene un timeout de seguridad para no colgarse si la deteccion de nubes falla.
     Devuelve las dimensiones de la ventana del juego.
     """
     dimensions = find_window("Clash of Clans")
     open_window("Clash of Clans")
 
+    start = time.time()
     average_color = 151
-    while (average_color > 150):
-        print("Waiting for clouds...")
+    while average_color > 150:
+        print("Esperando que se despejen las nubes...")
         clouds = screenshot(dimensions, CLOUDS_PNG)
-        average_color_row = np.average(np.array(clouds), axis=0)
-        average_color = np.average(average_color_row)
-        # print(average_color)
+        average_color = np.average(np.array(clouds))
+        if time.time() - start > timeout:
+            print("  (timeout de nubes: sigo igual)")
+            break
+        time.sleep(0.5)
 
     return dimensions
 

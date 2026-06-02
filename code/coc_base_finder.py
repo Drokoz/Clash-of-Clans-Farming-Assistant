@@ -16,22 +16,31 @@ from argparse import ArgumentParser
 import pyautogui
 
 from utils import open_window, wait_for_base
-from attack import valkyrie_attack
+from attack import valkyrie_attack, resources_full
 
-parser = ArgumentParser(description='Farmea atacando con valkirias hasta el 50% en cada base.')
+parser = ArgumentParser(description='Farmea atacando con valkirias hasta llenar tus recursos.')
 parser.add_argument('--bases', type=int, default=0,
-                    help='Cuantas bases atacar (0 = sin limite, hasta Ctrl-C).')
+                    help='Tope de bases a atacar (0 = sin tope; igual para al llenar recursos).')
 parser.add_argument('--no-ability', action='store_true',
                     help='No activar las habilidades de los heroes.')
+parser.add_argument('--ignore-resources', action='store_true',
+                    help='No chequear recursos; atacar hasta el tope --bases (o Ctrl-C).')
 args = parser.parse_args()
 
 open_window("Clash of Clans")
-print("Iniciando farmeo con valkirias...")
+print("Iniciando farmeo con valkirias (Ctrl-C para cortar)...")
 
 attacked = 0
 try:
     while args.bases == 0 or attacked < args.bases:
-        print(f"\n=== Base #{attacked + 1} ===")
+        # Estamos en la aldea: chequear si ya estan llenos los recursos.
+        if not args.ignore_resources:
+            print("\nChequeando recursos...")
+            if resources_full():
+                print("Recursos LLENOS. Termino el farmeo.")
+                break
+
+        print(f"=== Base #{attacked + 1} ===")
         pyautogui.click(x=221, y=936)    # 1) Atacar (aldea)
         time.sleep(1.5)
         pyautogui.click(x=351, y=731)    # 2) Buscar batalla
