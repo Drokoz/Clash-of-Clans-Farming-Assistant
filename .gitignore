@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Entornos virtuales (el venv vive fuera del repo, pero por las dudas)
+.venv/
+venv/
+
+# Capturas temporales que genera el bot en code/
+/code/destruction.png
+/code/valkcount.png
+/code/clouds.png
+/code/village.png
+/code/resources.png

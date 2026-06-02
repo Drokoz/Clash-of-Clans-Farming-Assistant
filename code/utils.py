@@ -5,7 +5,18 @@ import pyautogui
 from PIL import Image
 from ahk import AHK
 import re
+import os
+import sys
+import shutil
+import time
 import numpy as np
+
+# Carpeta de este script: guardamos los screenshots temporales aca,
+# asi no hace falta hardcodear rutas absolutas por maquina.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+CLOUDS_PNG = os.path.join(_HERE, "clouds.png")
+VILLAGE_PNG = os.path.join(_HERE, "village.png")
+RESOURCES_PNG = os.path.join(_HERE, "resources.png")
 
 def find_window(name):
     window = pygetwindow.getWindowsWithTitle(name)[0]
@@ -17,8 +28,21 @@ def find_window(name):
     else:
         return -1
     
+def _find_ahk_executable():
+    # ahk[binary] instala AutoHotkey.exe en la carpeta Scripts del venv,
+    # que solo esta en el PATH si el venv esta activado. Lo buscamos
+    # explicitamente al lado del interprete para no depender de eso.
+    exe = shutil.which("AutoHotkey.exe")
+    if exe:
+        return exe
+    candidate = os.path.join(os.path.dirname(sys.executable), "AutoHotkey.exe")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
 def open_window(name):
-    ahk = AHK()
+    exe = _find_ahk_executable()
+    ahk = AHK(executable_path=exe) if exe else AHK()
     win = ahk.win_get(title=name)
 
     if win:
@@ -70,24 +94,34 @@ def find_button(reference_image_path, village_image_path):
     matches = cv2.matchTemplate(village_img, next_button_img, cv2.TM_CCOEFF_NORMED)
     min, max, min_loc, max_loc = cv2.minMaxLoc(matches)
 
-def find_base_with(gold, elixir, dark_elixir=0):
+def wait_for_base():
+    """Espera a que se despejen las nubes del matchmaking y la base quede cargada.
+
+    Devuelve las dimensiones de la ventana del juego.
+    """
     dimensions = find_window("Clash of Clans")
     open_window("Clash of Clans")
 
     average_color = 151
     while (average_color > 150):
         print("Waiting for clouds...")
-        clouds = screenshot(dimensions, "C:\\Users\\gener\\Documents\\Code\\Clash of Clans Farming Assistant\\clouds.png")
-        average_color_row = np.average(clouds, axis=0)
+        clouds = screenshot(dimensions, CLOUDS_PNG)
+        average_color_row = np.average(np.array(clouds), axis=0)
         average_color = np.average(average_color_row)
         # print(average_color)
 
-    print("Analyzing base...")
-    screenshot(dimensions, "C:\\Users\\gener\\Documents\\Code\\Clash of Clans Farming Assistant\\village.png")
-    new_dimensions = [dimensions[0] + 72, dimensions[1] + 160, dimensions[0] + 170, dimensions[1] + 150]
-    screenshot(new_dimensions, "C:\\Users\\gener\\Documents\\Code\\Clash of Clans Farming Assistant\\resources.png")
+    return dimensions
 
-    images = preprocess_image("C:\\Users\\gener\\Documents\\Code\\Clash of Clans Farming Assistant\\resources.png")
+
+def find_base_with(gold, elixir, dark_elixir=0):
+    dimensions = wait_for_base()
+
+    print("Analyzing base...")
+    screenshot(dimensions, VILLAGE_PNG)
+    new_dimensions = [dimensions[0] + 72, dimensions[1] + 160, dimensions[0] + 170, dimensions[1] + 150]
+    screenshot(new_dimensions, RESOURCES_PNG)
+
+    images = preprocess_image(RESOURCES_PNG)
     string_values = read_values(images["black_white"])
     numbers = text_to_numbers(string_values)
 
