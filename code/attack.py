@@ -29,10 +29,12 @@ import time
 import math
 import random
 import warnings
+import threading
 
 import cv2
 import easyocr
 import pyautogui
+from pynput import keyboard as pynkb
 
 from utils import screenshot
 
@@ -42,15 +44,10 @@ warnings.filterwarnings("ignore", message=".*cudnn.*")
 
 # ============================= CONFIG (CALIBRAR) =============================
 
-# --- Anillo verde de despliegue: 4 LINEAS (bordes del "diamante"), calibradas ---
-# Cada linea es (inicio, fin). Valkirias y heroes se despliegan SOBRE estas lineas
-# (zona verde, fuera de la roja). Hay huecos arriba-centro y abajo-centro (zonas de UI).
-DEPLOY_LINES = [
-    ((275, 482), (892, 49)),     # izquierda-superior
-    ((1127, 51), (1749, 497)),   # derecha-superior
-    ((1749, 497), (1230, 849)),  # derecha-inferior
-    ((737, 856), (275, 482)),    # izquierda-inferior
-]
+# --- Anillo verde de despliegue ---
+# Las 4 LINEAS del "diamante" (zona verde donde caen valkirias/heroes) y los vertices de
+# heroes viven en PROFILES (cambian con el evento). Cada linea es (inicio, fin); hay huecos
+# arriba-centro y abajo-centro (UI).
 # Valkirias: FUERZA BRUTA. Son siempre VALK_TOTAL; se reparten en las 4 lineas (zonas) y
 # se tapean una por una, espaciadas a lo largo de cada linea (maxima area de ataque).
 VALK_TOTAL = 37
@@ -62,22 +59,53 @@ RANDOM_JITTER = 18
 # Variacion aleatoria (seg) que se suma a las pausas entre acciones.
 RANDOM_PAUSE = 0.05
 
-# Heroes: UNO por vertice del diamante (zona verde). Orden: Champion, Warden, Rey, Reina.
-HERO_DEPLOY_POINTS = [(275, 482), (1127, 51), (1749, 497), (737, 856)]  # izq, arriba, der, abajo
-
 # Centro de la base enemiga. Los totems SI se pueden tirar ADENTRO de la roja, asi que
 # los repartimos en un circulo chico alrededor del centro (cubren mas area que apilados).
 BASE_CENTER = (960, 430)
 SPELL_RADIUS = 180          # radio donde repartir los totems (0 = todos en el centro)
 
-# --- Barra de tropas (coordenada del icono de cada slot, segun tu ejercito) ---
-# Fila de slots en Y=936 (valk calibrado por el usuario; resto con paso ~118px).
-#   0 Valkirias | 1(Z) Asedio | 2(Q) Champion | 3(W) Warden | 4(E) Rey | 5(R) Reina | 6(A) Totems
-VALKYRIE_SLOT = (421, 936)                                     # valkirias (calibrado)
-SIEGE_SLOT    = (539, 936)                                     # maquina de asedio (None = no usar)
-SPELL_SLOTS   = [(1129, 936)]                                  # hechizos de totem
-SPELL_CHARGES = 11                                             # cantidad de totems (x11)
-HERO_SLOTS    = [(657, 936), (775, 936), (893, 936), (1011, 936)]  # Champion, Warden, Rey, Reina
+# --- Barra de tropas: PERFILES (la barra se corre cuando hay un evento activo) ---
+# Orden de slots: 0 Valk | 1(Z) Asedio | 2(Q) Champion | 3(W) Warden | 4(E) Rey | 5(R) Reina | 6(A) Totems
+# Para cambiar de perfil, edita ACTIVE_PROFILE. Calibra con click.py si la barra cambia.
+PROFILES = {
+    "normal": {   # sin evento (paso ~118px)
+        "VALKYRIE_SLOT": (421, 936),
+        "SIEGE_SLOT":    (539, 936),
+        "HERO_SLOTS":    [(657, 936), (775, 936), (893, 936), (1011, 936)],
+        "SPELL_SLOTS":   [(1129, 936)],
+        "DEPLOY_LINES": [
+            ((275, 482), (892, 49)),     # izquierda-superior
+            ((1127, 51), (1749, 497)),   # derecha-superior
+            ((1749, 497), (1230, 849)),  # derecha-inferior
+            ((737, 856), (275, 482)),    # izquierda-inferior
+        ],
+        "HERO_DEPLOY_POINTS": [(275, 482), (1127, 51), (1749, 497), (737, 856)],  # izq, arriba, der, abajo
+    },
+    "evento": {   # con evento activo (valk=630, totem=1200, paso ~95px interpolado)
+        "VALKYRIE_SLOT": (630, 945),
+        "SIEGE_SLOT":    (725, 945),
+        "HERO_SLOTS":    [(820, 945), (915, 945), (1010, 945), (1105, 945)],
+        "SPELL_SLOTS":   [(1200, 945)],
+        # Diamante del evento (mas grande), calibrado por el usuario con click.py.
+        "DEPLOY_LINES": [
+            ((143, 545), (728, 48)),     # izquierda-superior
+            ((1237, 58), (1804, 514)),   # derecha-superior
+            ((1804, 514), (1419, 851)),  # derecha-inferior
+            ((452, 773), (143, 545)),    # izquierda-inferior
+        ],
+        "HERO_DEPLOY_POINTS": [(143, 545), (1237, 58), (1804, 514), (452, 773)],  # izq, arriba, der, abajo
+    },
+}
+ACTIVE_PROFILE = "normal"   # default; se puede cambiar con set_profile() o --profile
+
+_p = PROFILES[ACTIVE_PROFILE]
+VALKYRIE_SLOT      = _p["VALKYRIE_SLOT"]                       # valkirias
+SIEGE_SLOT         = _p["SIEGE_SLOT"]                          # maquina de asedio (None = no usar)
+HERO_SLOTS         = _p["HERO_SLOTS"]                          # Champion, Warden, Rey, Reina
+SPELL_SLOTS        = _p["SPELL_SLOTS"]                         # hechizos de totem
+DEPLOY_LINES       = _p["DEPLOY_LINES"]                        # 4 lineas del anillo verde
+HERO_DEPLOY_POINTS = _p["HERO_DEPLOY_POINTS"]                  # vertices donde caen los heroes
+SPELL_CHARGES = 11                                            # cantidad de totems (x11)
 
 # --- Fin de batalla ---
 END_BATTLE_BTN = (216, 822)         # boton "Rendirse" para finalizar (calibrado)
@@ -124,6 +152,57 @@ def _get_reader():
         print("Cargando modelo OCR (una sola vez)...")
         _reader = easyocr.Reader(['en'], gpu=True)
     return _reader
+
+
+def set_profile(name):
+    """Cambia el perfil en runtime (slots de barra + lineas/vertices de despliegue)."""
+    global VALKYRIE_SLOT, SIEGE_SLOT, HERO_SLOTS, SPELL_SLOTS
+    global DEPLOY_LINES, HERO_DEPLOY_POINTS, ACTIVE_PROFILE
+    if name not in PROFILES:
+        raise ValueError(f"Perfil '{name}' desconocido. Opciones: {list(PROFILES)}")
+    ACTIVE_PROFILE = name
+    p = PROFILES[name]
+    VALKYRIE_SLOT = p["VALKYRIE_SLOT"]
+    SIEGE_SLOT = p["SIEGE_SLOT"]
+    HERO_SLOTS = p["HERO_SLOTS"]
+    SPELL_SLOTS = p["SPELL_SLOTS"]
+    DEPLOY_LINES = p["DEPLOY_LINES"]
+    HERO_DEPLOY_POINTS = p["HERO_DEPLOY_POINTS"]
+    print(f"Perfil de barra: {name}", flush=True)
+
+
+# ====== Pausa global (tecla F8) ======
+PAUSE_KEY = pynkb.Key.f8          # tecla para pausar / reanudar el bot
+_running = threading.Event()
+_running.set()                    # set = corriendo ; clear = en pausa
+_pause_listener = None
+
+
+def _on_pause_key(key):
+    if key == PAUSE_KEY:
+        if _running.is_set():
+            _running.clear()
+            print("\n>> PAUSA (apreta F8 para reanudar)", flush=True)
+        else:
+            _running.set()
+            print(">> Reanudado", flush=True)
+
+
+def setup_pause():
+    """Arranca el listener global de la tecla de pausa (no bloquea)."""
+    global _pause_listener
+    if _pause_listener is None:
+        _pause_listener = pynkb.Listener(on_press=_on_pause_key)
+        _pause_listener.daemon = True
+        _pause_listener.start()
+        print("Tecla de pausa: F8 (pausa/reanuda)", flush=True)
+
+
+def wait_if_paused():
+    """Si el bot esta en pausa, bloquea aca hasta que se reanude (F8)."""
+    if not _running.is_set():
+        print(">> en pausa... (F8 para reanudar)", flush=True)
+        _running.wait()
 
 
 def _select(slot):
@@ -279,6 +358,10 @@ def wait_until_pct(target=TARGET_PCT, timeout=ATTACK_TIMEOUT):
     start = time.time()
     best = 0
     while time.time() - start < timeout:
+        if not _running.is_set():           # en pausa: no contar ese tiempo para el timeout
+            _pause_t0 = time.time()
+            wait_if_paused()
+            start += time.time() - _pause_t0
         pct = read_destruction_pct()
         if pct is not None:
             if pct > best:
@@ -303,6 +386,7 @@ def end_battle():
 
 def valkyrie_attack(activate_ability=True):
     """Ejecuta el ataque completo sobre la base ya cargada en pantalla."""
+    wait_if_paused()
     print("Desplegando valkirias...")
     deploy_valkyries_circle()
 
@@ -328,6 +412,10 @@ if __name__ == "__main__":
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "full"
 
+    # perfil opcional como 2do argumento: ej.  python attack.py deploy evento
+    if len(sys.argv) > 2 and sys.argv[2] in PROFILES:
+        set_profile(sys.argv[2])
+
     if mode == "ocr":
         # Lee el % UNA vez y lo imprime. No hace clicks -> seguro.
         # Util para calibrar PCT_REGION: entra a una batalla y corre esto.
@@ -349,6 +437,7 @@ if __name__ == "__main__":
             print(f"  {start} -> {end}", flush=True)
         print(f"Heroes (uno por vertice): {_hero_points()}", flush=True)
         print(f"Totems repartidos en: {_spell_points()}", flush=True)
+        print(f"Perfil activo: {ACTIVE_PROFILE}", flush=True)
         print(f"Valkiria: {VALKYRIE_SLOT}  Asedio: {SIEGE_SLOT}", flush=True)
         print(f"Hechizos: {SPELL_SLOTS}  Heroes: {HERO_SLOTS}", flush=True)
 

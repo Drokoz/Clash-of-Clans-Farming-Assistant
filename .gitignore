@@ -12,3 +12,6 @@ venv/
 /code/clouds.png
 /code/village.png
 /code/resources.png
+
+# Coordenadas guardadas por click.py
+/code/coords.txt

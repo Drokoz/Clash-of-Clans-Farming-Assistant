@@ -16,23 +16,29 @@ from argparse import ArgumentParser
 import pyautogui
 
 from utils import open_window, wait_for_base
-from attack import valkyrie_attack, resources_full
+from attack import (valkyrie_attack, resources_full, set_profile, PROFILES,
+                    setup_pause, wait_if_paused)
 
 parser = ArgumentParser(description='Farmea atacando con valkirias hasta llenar tus recursos.')
 parser.add_argument('--bases', type=int, default=0,
                     help='Tope de bases a atacar (0 = sin tope; igual para al llenar recursos).')
+parser.add_argument('--profile', '--perfil', default='normal', choices=list(PROFILES),
+                    help='Perfil de barra de tropas (cambia segun haya evento activo).')
 parser.add_argument('--no-ability', action='store_true',
                     help='No activar las habilidades de los heroes.')
 parser.add_argument('--ignore-resources', action='store_true',
                     help='No chequear recursos; atacar hasta el tope --bases (o Ctrl-C).')
 args = parser.parse_args()
 
+set_profile(args.profile)
+setup_pause()
 open_window("Clash of Clans")
-print("Iniciando farmeo con valkirias (Ctrl-C para cortar)...")
+print("Iniciando farmeo con valkirias (F8 = pausa/reanuda, Ctrl-C = cortar)...")
 
 attacked = 0
 try:
     while args.bases == 0 or attacked < args.bases:
+        wait_if_paused()
         # Estamos en la aldea: chequear si ya estan llenos los recursos.
         if not args.ignore_resources:
             print("\nChequeando recursos...")
